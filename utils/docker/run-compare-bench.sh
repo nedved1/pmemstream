@@ -15,6 +15,7 @@ set -e
 BUILD_DIR="/tmp/pmemstream/bench_builds"
 TEST_PATH=${PMEMSTREAM_TEST_DIR:-"/tmp/pmemstream/benchfile"}
 USE_FORCED_PMEM=${TESTS_USE_FORCED_PMEM:-ON}
+P_THRESHOLD=${TEST_BENCH_THRESHOLD:-20}
 
 DEFAULT_REPO_ADDR="https://github.com/pmem/pmemstream"
 QUIET=""
@@ -23,6 +24,7 @@ COMPARE_REF="HEAD"
 COMPARE_REPO_ADDR=${DEFAULT_REPO_ADDR}
 BASELINE_REF="master"
 BASELINE_REPO_ADDR=${DEFAULT_REPO_ADDR}
+TEST_BENCH=""
 
 function print_usage() {
 	echo
@@ -30,6 +32,7 @@ function print_usage() {
 	echo "Usage: $(basename ${1}) [-h|--help] [-q|--quiet] [-p|--pr] [-r|--ref] [--compare_repo] [--baseline_ref] [--baseline_repo]"
 	echo "-h, --help       Print help and exit"
 	echo "-q, --quiet      Hide part of the verbose output (e.g. from CMake), to make it more readable"
+	echo "-t, --test       Test bench results and exit with error when values from comparing repo are worse than value defined in TEST_BENCH_THRESHOLD [TEST_BENCH_THRESHOLD: ${P_THRESHOLD}]"
 	echo "--pr             Pull Request for comparing (if set, the 'ref' is not taken into account)"
 	echo "--ref            Commit or branch for comparing, if PR not specified [default: ${COMPARE_REF}]"
 	echo "--compare_repo   GitHub repo address for comparing. It makes sense when using 'ref' option (and repo is different than upstream) [default: ${COMPARE_REPO_ADDR}]"
@@ -130,15 +133,44 @@ function compare_output() {
 	done
 }
 
+function test_values() {
+	baseline_log=${1}
+	compare_log=${2}
+	set_err=""
+
+	if [ ! -f ${baseline_log} ] || [ ! -f ${compare_log} ]; then
+		echo "Error: Output file(s) do not exist."
+		return 1
+	fi
+
+	for (( i=6; i<=$(wc -l < ${baseline_log}); i++ )); do
+		baseline_val=$(sed -n ${i}p ${baseline_log} | sed s/[^0-9,.]*//g)
+		compare_val=$(sed -n ${i}p ${compare_log} | sed s/[^0-9,.]*//g)
+		compare_name=$(sed -n ${i}p ${compare_log} | sed 's/[0-9,.,:]*//g' | awk '{$1=$1}1')
+
+		# equation_result is a percentage value of diverence of the compare_val campared to the baseline_val, 0 if negative value.
+		equation_result=$(bc <<< "val = 100 * ($compare_val - $baseline_val) / $baseline_val; if (val < 0) val = 0; val")
+		if [ "$equation_result" -gt "$P_THRESHOLD" ]; then
+			echo "Error: $compare_name is ${equation_result}% worse than the baseline!"
+			set_err=1
+		fi
+	done
+
+	if [ -n "${set_err}" ]; then
+		return 1
+	fi
+}
+
 ### main ###
 echo "Start of '${0}'"
 
-while getopts ":hq-:" optchar; do
+while getopts ":hqt-:" optchar; do
 	case "${optchar}" in
 		-)
 		case "${OPTARG}" in
 			help) print_usage ${0} && exit 0 ;;
 			quiet) QUIET=1 ;;
+			test) TEST_BENCH=1 ;;
 			pr=*) COMPARE_PR="${OPTARG#*=}" ;;
 			ref=*) COMPARE_REF="${OPTARG#*=}" ;;
 			compare_repo=*) COMPARE_REPO_ADDR="${OPTARG#*=}" ;;
@@ -149,6 +181,7 @@ while getopts ":hq-:" optchar; do
 		;;
 		h) print_usage ${0} && exit 0 ;;
 		q) QUIET=1 ;;
+		t) TEST_BENCH=1 ;;
 		*) echo "Invalid argument '${OPTARG}'"; print_usage ${0} && exit 1 ;;
 	esac
 done
@@ -180,5 +213,9 @@ for case in "baseline" "compare"; do
 done
 
 compare_output ${BUILD_DIR}/bench_baseline.log ${BUILD_DIR}/bench_compare.log
+
+if [ -n "${TEST_BENCH}" ]; then
+	test_values ${BUILD_DIR}/bench_baseline.log ${BUILD_DIR}/bench_compare.log
+fi
 
 popd
